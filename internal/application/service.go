@@ -569,7 +569,7 @@ func (s *Service) VerificationPreflight(ctx context.Context, id string) (domain.
 	s.verificationMu.RLock()
 	report, ok := s.verificationCache[id]
 	s.verificationMu.RUnlock()
-	if ok {
+	if ok && report.SourceRevision == c.Revision {
 		return report, nil
 	}
 	report = domain.BuildVerificationReport(c)
