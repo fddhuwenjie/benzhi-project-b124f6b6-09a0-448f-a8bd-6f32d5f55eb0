@@ -111,20 +111,17 @@ func (s *Store) Create(ctx context.Context, c *domain.SealCase, requestID, finge
 type Mutator func(*domain.SealCase) error
 
 func (s *Store) Apply(ctx context.Context, caseID string, expected int64, requestID, fingerprint, actor, eventType string, mutate Mutator) (*domain.SealCase, bool, error) {
-	// BUG(seed): the transaction and all of its statements use a detached
-	// context, so cancellation from the request lifecycle is ignored after
-	// the application layer enters the store.
-	tx, err := s.db.BeginTx(context.Background(), nil)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, false, err
 	}
 	defer tx.Rollback()
-	if prior, replay, err := lookupIdempotency(context.Background(), tx, requestID, fingerprint); err != nil {
+	if prior, replay, err := lookupIdempotency(ctx, tx, requestID, fingerprint); err != nil {
 		return nil, false, err
 	} else if replay {
 		return prior, true, nil
 	}
-	c, err := getCaseTx(context.Background(), tx, caseID)
+	c, err := getCaseTx(ctx, tx, caseID)
 	if err != nil {
 		return nil, false, err
 	}
@@ -137,12 +134,15 @@ func (s *Store) Apply(ctx context.Context, caseID string, expected int64, reques
 	if err = mutate(c); err != nil {
 		return nil, false, err
 	}
+	if err = ctx.Err(); err != nil {
+		return nil, false, err
+	}
 	c.Revision++
 	b, err := json.Marshal(c)
 	if err != nil {
 		return nil, false, err
 	}
-	res, err := tx.ExecContext(context.Background(), `UPDATE cases SET state=?,revision=?,snapshot=? WHERE case_id=? AND revision=?`, c.State, c.Revision, b, c.CaseID, expected)
+	res, err := tx.ExecContext(ctx, `UPDATE cases SET state=?,revision=?,snapshot=? WHERE case_id=? AND revision=?`, c.State, c.Revision, b, c.CaseID, expected)
 	if err != nil {
 		return nil, false, err
 	}
@@ -150,13 +150,16 @@ func (s *Store) Apply(ctx context.Context, caseID string, expected int64, reques
 	if n != 1 {
 		return nil, false, domain.Conflict(expected, c.Revision)
 	}
-	if err = appendEvent(context.Background(), tx, c, eventType, actor); err != nil {
+	if err = appendEvent(ctx, tx, c, eventType, actor); err != nil {
 		return nil, false, err
 	}
-	if err = syncProjections(context.Background(), tx, c); err != nil {
+	if err = syncProjections(ctx, tx, c); err != nil {
 		return nil, false, err
 	}
-	if err = saveIdempotency(context.Background(), tx, requestID, fingerprint, c.CaseID, b); err != nil {
+	if err = saveIdempotency(ctx, tx, requestID, fingerprint, c.CaseID, b); err != nil {
+		return nil, false, err
+	}
+	if err = ctx.Err(); err != nil {
 		return nil, false, err
 	}
 	if err = tx.Commit(); err != nil {
