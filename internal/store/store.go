@@ -242,7 +242,7 @@ func (s *Store) Get(ctx context.Context, id string) (*domain.SealCase, error) {
 	cached := s.cache[id]
 	s.mu.RUnlock()
 	if cached != nil {
-		return cached, nil
+		return cached.Clone(), nil
 	}
 	c, err := getCaseQuery(ctx, s.db, id)
 	if err != nil {
@@ -256,7 +256,7 @@ func (s *Store) Get(ctx context.Context, id string) (*domain.SealCase, error) {
 		cached = c
 	}
 	s.mu.Unlock()
-	return cached, nil
+	return cached.Clone(), nil
 }
 func (s *Store) List(ctx context.Context, limit int) ([]domain.SealCase, error) {
 	if limit <= 0 || limit > 100 {
