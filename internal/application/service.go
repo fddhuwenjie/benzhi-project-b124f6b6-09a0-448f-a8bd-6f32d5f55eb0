@@ -535,13 +535,27 @@ func (s *Service) Archive(ctx context.Context, id string) (ArchiveVerification, 
 	return ArchiveVerification{Archive: a, Checks: checks, EventCount: len(events), EvidenceCount: len(c.Checkpoints), VerifiedAt: s.now().UTC()}, nil
 }
 
-// archiveFactsDigest 仅覆盖归档重建所需的部分事实；基线和偏差字段未纳入摘要。
+// archiveFactsDigest 覆盖归档冻结的全部业务事实，包含井况基线、偏差集合、
+// 施工方案、检查点与放行决定；任一基线或偏差字段被篡改时摘要必然不一致。
 func archiveFactsDigest(c domain.SealCase) string {
 	return domain.MustDigest(struct {
-		Plan        *domain.SealPlan                `json:"plan"`
+		Baseline    baselineFacts                 `json:"baseline"`
+		Deviations  []domain.Deviation             `json:"deviations"`
+		Plan        *domain.SealPlan               `json:"plan"`
 		Checkpoints []domain.ConstructionCheckpoint `json:"checkpoints"`
-		Release     *domain.ReleaseDecision         `json:"release"`
-	}{c.Plan, domain.NormalizedCheckpoints(c.Checkpoints), c.Release})
+		Release     *domain.ReleaseDecision        `json:"release"`
+	}{baselineFacts{c.CaseID, c.WellCode, c.SiteName, c.Latitude, c.Longitude, c.TotalDepthM, c.CasingDiameterMM, c.OwnerName}, domain.NormalizedDeviations(c.Deviations), c.Plan, domain.NormalizedCheckpoints(c.Checkpoints), c.Release})
+}
+
+type baselineFacts struct {
+	CaseID           string  `json:"case_id"`
+	WellCode         string  `json:"well_code"`
+	SiteName         string  `json:"site_name"`
+	Latitude         float64 `json:"latitude"`
+	Longitude        float64 `json:"longitude"`
+	TotalDepthM      float64 `json:"total_depth_m"`
+	CasingDiameterMM float64 `json:"casing_diameter_mm"`
+	OwnerName        string  `json:"owner_name"`
 }
 
 func (s *Service) apply(ctx context.Context, id string, m Meta, body any, event string, fn store.Mutator) (CaseView, error) {
