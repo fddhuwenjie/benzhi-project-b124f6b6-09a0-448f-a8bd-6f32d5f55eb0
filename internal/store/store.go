@@ -43,7 +43,7 @@ func (s *Store) migrate(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS cases(case_id TEXT PRIMARY KEY, state TEXT NOT NULL, revision INTEGER NOT NULL, created_at TEXT NOT NULL, snapshot BLOB NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS audit_events(sequence INTEGER PRIMARY KEY AUTOINCREMENT, case_id TEXT NOT NULL REFERENCES cases(case_id), event_type TEXT NOT NULL, actor TEXT NOT NULL, occurred_at TEXT NOT NULL, revision INTEGER NOT NULL, data_digest TEXT NOT NULL, previous_digest TEXT NOT NULL, digest TEXT NOT NULL UNIQUE, change_summary TEXT NOT NULL DEFAULT '')`,
 		`CREATE INDEX IF NOT EXISTS idx_audit_case_sequence ON audit_events(case_id,sequence)`,
-		`CREATE TABLE IF NOT EXISTS idempotency(request_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, case_id TEXT NOT NULL, response BLOB NOT NULL, created_at TEXT NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS idempotency(case_id TEXT NOT NULL, request_id TEXT NOT NULL, fingerprint TEXT NOT NULL, response BLOB NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(case_id,request_id))`,
 		`CREATE TABLE IF NOT EXISTS archives(case_id TEXT PRIMARY KEY REFERENCES cases(case_id), archive_id TEXT NOT NULL UNIQUE, manifest_digest TEXT NOT NULL, payload BLOB NOT NULL, metadata BLOB NOT NULL, created_at TEXT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS seal_plans(plan_id TEXT PRIMARY KEY, case_id TEXT NOT NULL UNIQUE REFERENCES cases(case_id), digest TEXT NOT NULL, locked_at TEXT NOT NULL, snapshot BLOB NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS construction_checkpoints(checkpoint_id TEXT PRIMARY KEY, case_id TEXT NOT NULL REFERENCES cases(case_id), sequence_no INTEGER NOT NULL, stage_type TEXT NOT NULL, measured_at TEXT NOT NULL, snapshot BLOB NOT NULL, UNIQUE(case_id,sequence_no))`,
@@ -64,6 +64,19 @@ func (s *Store) migrate(ctx context.Context) error {
 			return err
 		}
 	}
+	// 为已有数据库将幂等键约束改为按个案作用域，避免不同个案因相同 request_id 互相重放。
+	var idempPk string
+	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE((SELECT GROUP_CONCAT(name) FROM pragma_table_info('idempotency') WHERE pk>0),'')`).Scan(&idempPk); err != nil {
+		return err
+	}
+	if idempPk == "request_id" {
+		if _, err := s.db.ExecContext(ctx, `DROP TABLE idempotency`); err != nil {
+			return fmt.Errorf("重建幂等表失败: %w", err)
+		}
+		if _, err := s.db.ExecContext(ctx, `CREATE TABLE idempotency(case_id TEXT NOT NULL, request_id TEXT NOT NULL, fingerprint TEXT NOT NULL, response BLOB NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(case_id,request_id))`); err != nil {
+			return fmt.Errorf("重建幂等表失败: %w", err)
+		}
+	}
 	var result string
 	if err := s.db.QueryRowContext(ctx, "PRAGMA integrity_check").Scan(&result); err != nil {
 		return err
@@ -80,7 +93,7 @@ func (s *Store) Create(ctx context.Context, c *domain.SealCase, requestID, finge
 		return nil, false, err
 	}
 	defer tx.Rollback()
-	if prior, replay, err := lookupIdempotency(ctx, tx, requestID, fingerprint); err != nil {
+	if prior, replay, err := lookupIdempotency(ctx, tx, c.CaseID, requestID, fingerprint); err != nil {
 		return nil, false, err
 	} else if replay {
 		return prior, true, nil
@@ -116,7 +129,7 @@ func (s *Store) Apply(ctx context.Context, caseID string, expected int64, reques
 		return nil, false, err
 	}
 	defer tx.Rollback()
-	if prior, replay, err := lookupIdempotency(ctx, tx, requestID, fingerprint); err != nil {
+	if prior, replay, err := lookupIdempotency(ctx, tx, caseID, requestID, fingerprint); err != nil {
 		return nil, false, err
 	} else if replay {
 		return prior, true, nil
@@ -168,7 +181,7 @@ func (s *Store) FreezeArchive(ctx context.Context, caseID string, expected int64
 		return nil, false, err
 	}
 	defer tx.Rollback()
-	if prior, replay, err := lookupIdempotency(ctx, tx, requestID, fingerprint); err != nil {
+	if prior, replay, err := lookupIdempotency(ctx, tx, caseID, requestID, fingerprint); err != nil {
 		return nil, false, err
 	} else if replay {
 		return prior, true, nil
@@ -495,12 +508,15 @@ func getCaseQuery(ctx context.Context, q queryer, id string) (*domain.SealCase, 
 func getCaseTx(ctx context.Context, tx *sql.Tx, id string) (*domain.SealCase, error) {
 	return getCaseQuery(ctx, tx, id)
 }
-func lookupIdempotency(ctx context.Context, tx *sql.Tx, id, fingerprint string) (*domain.SealCase, bool, error) {
+func lookupIdempotency(ctx context.Context, tx *sql.Tx, caseID, id, fingerprint string) (*domain.SealCase, bool, error) {
 	if id == "" {
 		return nil, false, domain.Invalid("request_id 不能为空", nil)
 	}
+	if caseID == "" {
+		return nil, false, domain.Invalid("case_id 不能为空", nil)
+	}
 	var saved, response []byte
-	err := tx.QueryRowContext(ctx, `SELECT fingerprint,response FROM idempotency WHERE request_id=?`, id).Scan(&saved, &response)
+	err := tx.QueryRowContext(ctx, `SELECT fingerprint,response FROM idempotency WHERE case_id=? AND request_id=?`, caseID, id).Scan(&saved, &response)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, false, nil
 	}
@@ -508,7 +524,7 @@ func lookupIdempotency(ctx context.Context, tx *sql.Tx, id, fingerprint string) 
 		return nil, false, err
 	}
 	if string(saved) != fingerprint {
-		return nil, false, &domain.BusinessError{Code: domain.CodeIdempotency, Message: "request_id 已用于不同请求"}
+		return nil, false, &domain.BusinessError{Code: domain.CodeIdempotency, Message: "request_id 已用于该个案的不同请求"}
 	}
 	var c domain.SealCase
 	if err = json.Unmarshal(response, &c); err != nil {
@@ -517,7 +533,7 @@ func lookupIdempotency(ctx context.Context, tx *sql.Tx, id, fingerprint string) 
 	return &c, true, nil
 }
 func saveIdempotency(ctx context.Context, tx *sql.Tx, id, fingerprint, caseID string, response []byte) error {
-	_, err := tx.ExecContext(ctx, `INSERT INTO idempotency(request_id,fingerprint,case_id,response,created_at) VALUES(?,?,?,?,?)`, id, fingerprint, caseID, response, time.Now().UTC().Format(time.RFC3339Nano))
+	_, err := tx.ExecContext(ctx, `INSERT INTO idempotency(case_id,request_id,fingerprint,response,created_at) VALUES(?,?,?,?,?)`, caseID, id, fingerprint, response, time.Now().UTC().Format(time.RFC3339Nano))
 	return err
 }
 func appendEvent(ctx context.Context, tx *sql.Tx, c *domain.SealCase, eventType, actor string) error {
