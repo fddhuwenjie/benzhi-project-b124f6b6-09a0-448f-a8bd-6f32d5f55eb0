@@ -67,19 +67,43 @@ func (s *Store) checkCaseProjection(ctx context.Context, c *domain.SealCase) err
 			return fmt.Errorf("方案投影内容不匹配")
 		}
 	}
-	cpCount, err := countRows(ctx, s.db, `SELECT COUNT(*) FROM construction_checkpoints WHERE case_id=?`, c.CaseID)
-	if err != nil {
+	if err = s.checkCollectionProjection(ctx, c.CaseID, len(c.Checkpoints),
+		`SELECT snapshot FROM construction_checkpoints WHERE case_id=?`,
+		func(raw []byte) (string, string, error) {
+			var cp domain.ConstructionCheckpoint
+			if e := json.Unmarshal(raw, &cp); e != nil {
+				return "", "", e
+			}
+			return cp.CheckpointID, domain.MustDigest(cp), nil
+		},
+		func(id string) (string, bool) {
+			for _, cp := range c.Checkpoints {
+				if cp.CheckpointID == id {
+					return domain.MustDigest(cp), true
+				}
+			}
+			return "", false
+		}, "检查点"); err != nil {
 		return err
 	}
-	if cpCount != len(c.Checkpoints) {
-		return fmt.Errorf("检查点投影数量为 %d，快照为 %d", cpCount, len(c.Checkpoints))
-	}
-	devCount, err := countRows(ctx, s.db, `SELECT COUNT(*) FROM deviations WHERE case_id=?`, c.CaseID)
-	if err != nil {
+	if err = s.checkCollectionProjection(ctx, c.CaseID, len(c.Deviations),
+		`SELECT snapshot FROM deviations WHERE case_id=?`,
+		func(raw []byte) (string, string, error) {
+			var d domain.Deviation
+			if e := json.Unmarshal(raw, &d); e != nil {
+				return "", "", e
+			}
+			return d.DeviationID, domain.MustDigest(d), nil
+		},
+		func(id string) (string, bool) {
+			for _, d := range c.Deviations {
+				if d.DeviationID == id {
+					return domain.MustDigest(d), true
+				}
+			}
+			return "", false
+		}, "偏差"); err != nil {
 		return err
-	}
-	if devCount != len(c.Deviations) {
-		return fmt.Errorf("偏差投影数量为 %d，快照为 %d", devCount, len(c.Deviations))
 	}
 	releaseCount, err := countRows(ctx, s.db, `SELECT COUNT(*) FROM release_decisions WHERE case_id=?`, c.CaseID)
 	if err != nil {
@@ -87,6 +111,19 @@ func (s *Store) checkCaseProjection(ctx context.Context, c *domain.SealCase) err
 	}
 	if (c.Release == nil && releaseCount != 0) || (c.Release != nil && releaseCount != 1) {
 		return fmt.Errorf("放行决定投影数量为 %d", releaseCount)
+	}
+	if c.Release != nil {
+		var raw []byte
+		if err = s.db.QueryRowContext(ctx, `SELECT snapshot FROM release_decisions WHERE case_id=?`, c.CaseID).Scan(&raw); err != nil {
+			return err
+		}
+		var rel domain.ReleaseDecision
+		if err = json.Unmarshal(raw, &rel); err != nil {
+			return fmt.Errorf("放行决定投影快照无法解析: %w", err)
+		}
+		if domain.MustDigest(rel) != domain.MustDigest(*c.Release) {
+			return fmt.Errorf("放行决定投影内容不匹配")
+		}
 	}
 	archiveCount, err := countRows(ctx, s.db, `SELECT COUNT(*) FROM archives WHERE case_id=?`, c.CaseID)
 	if err != nil {
@@ -97,6 +134,56 @@ func (s *Store) checkCaseProjection(ctx context.Context, c *domain.SealCase) err
 	}
 	if c.State != domain.StateArchived && archiveCount != 0 {
 		return fmt.Errorf("非归档状态存在冻结归档")
+	}
+	return nil
+}
+
+// checkCollectionProjection 校验多行投影集合（检查点、偏差）。
+// 除行数外，逐行解码 snapshot 并以稳定标识与个案快照中的同标识比对摘要。
+// 任何内容篡改（保持行数不变）都会因摘要不一致被报告为不一致。
+func (s *Store) checkCollectionProjection(ctx context.Context, caseID string, expected int, query string,
+	decode func([]byte) (id, digest string, err error),
+	lookup func(id string) (digest string, ok bool), label string) error {
+	rows, err := s.db.QueryContext(ctx, query, caseID)
+	if err != nil {
+		return fmt.Errorf("读取%s投影失败: %w", label, err)
+	}
+	seen := make(map[string]bool, expected)
+	for rows.Next() {
+		var raw []byte
+		if err = rows.Scan(&raw); err != nil {
+			rows.Close()
+			return err
+		}
+		id, projectedDigest, err := decode(raw)
+		if err != nil {
+			rows.Close()
+			return fmt.Errorf("%s投影快照无法解析: %w", label, err)
+		}
+		expectedDigest, ok := lookup(id)
+		if !ok {
+			rows.Close()
+			return fmt.Errorf("%s投影行 %s 不在个案快照内", label, id)
+		}
+		if projectedDigest != expectedDigest {
+			rows.Close()
+			return fmt.Errorf("%s投影行 %s 内容不匹配", label, id)
+		}
+		if seen[id] {
+			rows.Close()
+			return fmt.Errorf("%s投影行 %s 重复", label, id)
+		}
+		seen[id] = true
+	}
+	if err = rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err = rows.Close(); err != nil {
+		return err
+	}
+	if len(seen) != expected {
+		return fmt.Errorf("%s投影去重后数量为 %d，快照为 %d", label, len(seen), expected)
 	}
 	return nil
 }
