@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>监测井封填见证台</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <header><div><p class="eyebrow">GROUNDWATER ASSURANCE</p><h1>监测井封填见证台</h1></div><div class="chain">基线 → 施工 → 验证 → 放行 → 归档</div></header>
+  <main>
+    <aside>
+      <button id="new-case" class="primary full">＋ 建立封填个案</button>
+      <h2>封填个案</h2>
+      <form id="case-filter"><label>关键词<input name="keyword" maxlength="100" placeholder="井号 / 场地 / 责任人"></label><label>状态<select name="state"><option value="">全部状态</option><option value="draft">草稿</option><option value="baseline_locked">基线已冻结</option><option value="sealing">分段施工</option><option value="held">受控暂停</option><option value="verification">待独立见证</option><option value="archived">只读归档</option></select></label><button class="ghost">筛选</button></form>
+      <p id="case-summary" class="eyebrow"></p><button id="quality-summary" class="ghost full" type="button">质量汇总</button><div id="quality-panel" hidden></div><div id="case-list" class="case-list"></div><button id="next-page" class="ghost full" hidden>下一页</button>
+    </aside>
+    <section id="workspace">
+      <div id="empty" class="empty"><div class="well-mark">◎</div><h2>选择一个个案开始见证</h2><p>每一次施工记录都会进入不可覆写的审计事件链。</p></div>
+      <div id="case-view" hidden>
+        <div class="case-head"><div><p id="well-code" class="eyebrow"></p><h2 id="site-name"></h2></div><div><span id="state" class="state"></span><span id="revision" class="revision"></span></div></div>
+        <div id="progress-wrap" class="progress-wrap"><div class="progress-label"><span>区间完成度</span><strong id="progress-label"></strong></div><div class="progress"><i id="progress"></i></div></div>
+        <div id="notice" class="notice" hidden></div>
+        <div class="grid"><article><h3>当前操作</h3><div id="actions"></div></article><article><h3>个案基线</h3><dl id="facts"></dl></article></div>
+        <article><div class="title-row"><h3>审计时间线</h3><button id="refresh" class="ghost">刷新</button></div><ol id="timeline" class="timeline"></ol></article>
+      </div>
+    </section>
+  </main>
+  <dialog id="create-dialog"><form id="create-form"><div class="title-row"><h2>建立封填个案</h2><button type="button" class="ghost close">关闭</button></div><div class="form-grid"><label>井编号<input name="well_code" required></label><label>场地名称<input name="site_name" required></label><label>纬度<input name="latitude" type="number" step="any" value="31.2304" required></label><label>经度<input name="longitude" type="number" step="any" value="121.4737" required></label><label>井深（m）<input name="total_depth_m" type="number" step="0.01" required></label><label>套管直径（mm）<input name="casing_diameter_mm" type="number" step="0.1" required></label><label>责任人<input name="owner_name" required></label><label>建档人<input name="actor" required></label></div><button class="primary">保存草稿</button></form></dialog>
+  <template id="plan-template"><form data-action="plan"><p>先运行只读预检；无阻断问题后可冻结同一载荷。</p><label>分层方案<textarea name="layers" rows="8" required></textarea></label><div class="form-grid"><label>材料批次（逗号分隔）<input name="lots" required></label><label>用量容差（%）<input name="tolerance" type="number" value="10" min="0" max="50" required></label><label>证据类型（逗号分隔）<input name="evidence" value="photo,field_log" required></label><label>编制人<input name="prepared" required></label><label>复核人<input name="reviewed" required></label><label>操作人<input name="actor" required></label></div><button type="button" data-preflight="plan" class="ghost">核算与锁定预检</button> <button class="primary">冻结方案</button><div class="preflight"></div></form></template>
+  <template id="baseline-template"><form data-action="baseline"><p>草稿阶段可修订井号、场地、坐标、井深、套管和责任人；提交后自动校核并记录审计事件。</p><div class="form-grid"><label>井号<input name="well_code"></label><label>场地<input name="site_name"></label><label>纬度<input name="latitude" type="number" step="any"></label><label>经度<input name="longitude" type="number" step="any"></label><label>井深（m）<input name="total_depth_m" type="number" step="any"></label><label>套管直径（mm）<input name="casing_diameter_mm" type="number" step="any"></label><label>责任人<input name="owner_name"></label><label>操作人<input name="actor" required></label></div><button class="primary">保存基线修订</button></form></template>
+  <template id="checkpoint-template"><form data-action="checkpoint"><p>单条模式复用下列字段；也可填写批量 JSON 数组一次原子提交。</p><label>批量 items（可选）<textarea name="items" rows="4" placeholder='[{"sequence_no":1,...}]'></textarea></label><div class="form-grid"><label>区间序号<input name="sequence" type="number" min="1" required></label><label>施工阶段<select name="stage"><option>cleaning</option><option selected>placement</option><option>isolation</option><option>surface_restoration</option></select></label><label>起始深度（m）<input name="from" type="number" step="0.01" required></label><label>终止深度（m）<input name="to" type="number" step="0.01" required></label><label>材料批次<input name="lot" required></label><label>实际用量（L）<input name="volume" type="number" step="0.01" required></label><label>记录人<input name="recorder" required></label><label>证据 SHA-256 摘要<input name="digest" minlength="8" required></label><label>证据类型（逗号分隔）<input name="evidence" value="photo,field_log" required></label><label>终孔标高（m）<input name="elevation" type="number" step="0.001" value="0" required></label></div><button class="primary">提交检查点批次</button></form></template>
+  <template id="resolve-template"><form data-action="resolve"><label>待关闭偏差<select name="deviation"></select></label><label>纠正动作<textarea name="action" required></textarea></label><label>结构化复验值（JSON）<input name="values" value='{"evidence_verified":1,"material_lot_verified":1,"actual_volume_l":1,"measured_depth_m":1}' required></label><div class="form-grid"><label>复验结果<select name="retest"><option value="passed">passed</option><option value="failed">failed</option></select></label><label>关闭人<input name="closed_by" required></label><label>操作人<input name="actor" required></label></div><button class="primary">完成纠正与复验</button></form></template>
+  <script src="/static/app.js" defer></script>
+</body>
+</html>
